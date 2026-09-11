@@ -1,0 +1,225 @@
+{
+    "name": "vibe-coding-local",
+    "displayName": "VibeCoding Local",
+    "description": "Asistente de desarrollo VibeCoding 100% local con Ollama (Qwen Coder, DeepSeek R1, Llama 3.2 Vision, Nomic Embeddings), Streaming en tiempo real, Tool Calling quirúrgico, RAG local, Diagnósticos LSP y soporte de voz.",
+    "version": "0.2.0",
+    "engines": {
+        "vscode": "^1.90.0"
+    },
+    "categories": [
+        "Machine Learning",
+        "Programming Languages",
+        "AI",
+        "Chat"
+    ],
+    "activationEvents": [],
+    "main": "./out/extension.js",
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "vibe-coding-local-container",
+                    "title": "VibeCoding Local",
+                    "icon": "$(hubot)"
+                }
+            ]
+        },
+        "views": {
+            "vibe-coding-local-container": [
+                {
+                    "type": "webview",
+                    "id": "vibe-coding-local.chatView",
+                    "name": "VibeCoding Agent",
+                    "icon": "$(hubot)"
+                }
+            ]
+        },
+        "commands": [
+            {
+                "command": "vibe-coding-local.startAgent",
+                "title": "VibeCoding: Abrir Panel de Agente Local"
+            },
+            {
+                "command": "vibe-coding-local.clearChat",
+                "title": "VibeCoding: Reiniciar Conversación"
+            },
+            {
+                "command": "vibe-coding-local.explainCode",
+                "title": "VibeCoding: Explicar código seleccionado"
+            },
+            {
+                "command": "vibe-coding-local.refactorCode",
+                "title": "VibeCoding: Refactorizar / Optimizar selección"
+            },
+            {
+                "command": "vibe-coding-local.fixDiagnostics",
+                "title": "VibeCoding: Diagnosticar y corregir errores del proyecto"
+            }
+        ],
+        "menus": {
+            "editor/context": [
+                {
+                    "command": "vibe-coding-local.explainCode",
+                    "when": "editorHasSelection",
+                    "group": "vibecoding_ai@1"
+                },
+                {
+                    "command": "vibe-coding-local.refactorCode",
+                    "when": "editorHasSelection",
+                    "group": "vibecoding_ai@2"
+                },
+                {
+                    "command": "vibe-coding-local.fixDiagnostics",
+                    "when": "editorTextFocus",
+                    "group": "vibecoding_ai@3"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "VibeCoding Local",
+            "properties": {
+                "vibe-coding-local.ollamaHost": {
+                    "type": "string",
+                    "default": "http://127.0.0.1:11434",
+                    "description": "URL base del servidor local de Ollama."
+                },
+                "vibe-coding-local.codingModel": {
+                    "type": "string",
+                    "default": "qwen3-coder-cpu:latest",
+                    "description": "Modelo principal para generación de código y Tool Calling (ej. qwen3-coder-cpu:latest, qwen2.5-coder:7b)."
+                },
+                "vibe-coding-local.reasoningModel": {
+                    "type": "string",
+                    "default": "deepseek-r1:14b",
+                    "description": "Modelo de razonamiento profundo para análisis de fallos, arquitectura y resolución de bucles."
+                },
+                "vibe-coding-local.visionModel": {
+                    "type": "string",
+                    "default": "llama3.2-vision:11b",
+                    "description": "Modelo multimodal para análisis de imágenes, mockups de interfaz y diagramas."
+                },
+                "vibe-coding-local.embeddingModel": {
+                    "type": "string",
+                    "default": "nomic-embed-text:latest",
+                    "description": "Modelo de embeddings locales para búsqueda semántica RAG en el workspace."
+                },
+                "vibe-coding-local.enableStreaming": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Habilita la generación de respuestas con streaming token a token en tiempo real."
+                },
+                "vibe-coding-local.maxToolRecursionDepth": {
+                    "type": "number",
+                    "default": 10,
+                    "description": "Límite máximo de pasos consecutivos de herramientas por turno para evitar sobrecarga."
+                },
+                "vibe-coding-local.ragTopK": {
+                    "type": "number",
+                    "default": 4,
+                    "description": "Número de fragmentos más relevantes a retornar en búsquedas semánticas."
+                },
+                "vibe-coding-local.cloudFilterEnabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Activa el filtro opcional en la nube (Groq/Gemini) para enriquecer los prompts antes de enviarlos al modelo local."
+                },
+                "vibe-coding-local.cloudProvider": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "gemini",
+                        "groq"
+                    ],
+                    "default": "auto",
+                    "description": "Proveedor preferido para el Meta-Prompt en la nube: 'auto' (alterna respetando límites de cuota), 'gemini' o 'groq'."
+                },
+                "vibe-coding-local.groqApiKey": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Clave API de Groq."
+                },
+                "vibe-coding-local.groqModel": {
+                    "type": "string",
+                    "default": "llama-3.3-70b-versatile",
+                    "description": "Modelo de Groq optimizado y económico para Prompt Engineering (ej. llama-3.3-70b-versatile, llama-3.1-8b-instant)."
+                },
+                "vibe-coding-local.groqQuotaPercentage": {
+                    "type": "number",
+                    "default": 10,
+                    "description": "Porcentaje máximo estricto de uso permitido de tu cuota de Groq (10%)."
+                },
+                "vibe-coding-local.groqDailyLimit": {
+                    "type": "number",
+                    "default": 140,
+                    "description": "Límite máximo diario de peticiones para Groq (equivalente al 10% permitido)."
+                },
+                "vibe-coding-local.geminiApiKey": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Clave API de Google AI Studio / Gemini."
+                },
+                "vibe-coding-local.geminiModel": {
+                    "type": "string",
+                    "default": "gemini-2.0-flash",
+                    "description": "Modelo de Gemini más rápido y económico para Prompt Engineering (ej. gemini-2.0-flash, gemini-1.5-flash)."
+                },
+                "vibe-coding-local.geminiQuotaPercentage": {
+                    "type": "number",
+                    "default": 5,
+                    "description": "Porcentaje máximo estricto de uso permitido de tu suscripción Google AI (5%)."
+                },
+                "vibe-coding-local.geminiDailyLimit": {
+                    "type": "number",
+                    "default": 75,
+                    "description": "Límite máximo diario de peticiones para Gemini (equivalente al 5% permitido de 1500 peticiones/día)."
+                },
+                "vibe-coding-local.skillsPath": {
+                    "type": "string",
+                    "default": "/home/juan-geronimo-lucio-ramirez/Escritorio/skills",
+                    "description": "Ruta absoluta al directorio donde residen las habilidades especializadas (Skills)."
+                },
+                "vibe-coding-local.enableAutoSkills": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Habilita la detección, perfilado de proyecto e inyección selectiva de Skills."
+                },
+                "vibe-coding-local.skillsActivationMode": {
+                    "type": "string",
+                    "enum": ["on-demand", "always", "disabled"],
+                    "default": "on-demand",
+                    "description": "Modo de activación de skills: 'on-demand' (analiza el catálogo y activa solo cuando el usuario lo indique en el prompt o con @skill), 'always' (automático en cada mensaje), 'disabled' (desactivado)."
+                },
+                "vibe-coding-local.maxActiveSkills": {
+                    "type": "number",
+                    "default": 2,
+                    "description": "Número máximo de habilidades especializadas congruentes a inyectar simultáneamente por mensaje (recomendado: 1-2)."
+                },
+                "vibe-coding-local.reasoningUseGpu": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Si está desactivado (recomendado para APUs AMD/Intel o GPUs con menos de 12GB VRAM), ejecuta el modelo de razonamiento en CPU para evitar errores 500 de memoria VRAM o ROCm."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "vscode-test"
+    },
+    "devDependencies": {
+        "@types/node": "20.x",
+        "@types/vscode": "^1.90.0",
+        "@typescript-eslint/eslint-plugin": "^7.11.0",
+        "@typescript-eslint/parser": "^7.11.0",
+        "eslint": "^8.57.0",
+        "typescript": "^5.4.5"
+    },
+    "dependencies": {
+        "axios": "^1.19.0",
+        "ollama": "^0.5.1"
+    }
+}
