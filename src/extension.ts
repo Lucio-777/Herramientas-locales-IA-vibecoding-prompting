@@ -1,10 +1,20 @@
+/**
+ * @file extension.ts
+ * @description Punto de entrada principal de VibeCoding Local con soporte Multi-IDE y FreeLLMAPI.
+ */
 import * as vscode from 'vscode';
 import { ChatViewProvider } from './chatViewProvider';
 import { DiffService } from './services/diffService';
 import { QuotaTracker } from './services/quotaTracker';
+import { McpBridgeServer } from './services/mcpBridgeServer';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('[VibeCoding Local] Extensión activada con soporte para Ollama (Qwen, DeepSeek, Llama Vision, Nomic) y Filtro Cloud.');
+    console.log('[VibeCoding Local] Extensión activada con soporte para Ollama, FreeLLMAPI y MCP Bridge Multi-IDE.');
+
+    // Puente MCP Multi-IDE (Antigravity + VS Code + Visual Studio) en http://127.0.0.1:3002/mcp
+    const mcpBridge = new McpBridgeServer(3002, '127.0.0.1');
+    context.subscriptions.push(mcpBridge);
+    void mcpBridge.start();
 
     // Inicializar rastreador estricto de cuotas en la nube
     QuotaTracker.getInstance().init(context);

@@ -1,0 +1,77 @@
+{
+  "mcpServers": {
+    "github": {
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "command": "npx",
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "TU_GITHUB_PERSONAL_ACCESS_TOKEN_AQUI"
+      }
+    },
+    "memory": {
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "command": "npx"
+    },
+    "playwright": {
+      "args": [
+        "-y",
+        "@executeautomation/playwright-mcp-server"
+      ],
+      "command": "npx"
+    },
+    "postgres": {
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "postgresql://postgres:postgres@localhost:5432/postgres"
+      ],
+      "command": "npx"
+    },
+    "sqlite": {
+      "args": [
+        "-y",
+        "mcp-server-sqlite",
+        "--db",
+        "__USER_HOME__\\.gemini\\antigravity-ide\\scratch\\database.db"
+      ],
+      "command": "npx"
+    },
+    "vibecoding-mcp": {
+      "args": [
+        "__USER_HOME__\\.gemini\\antigravity-ide\\scratch\\Herramientas-locales-IA-vibecoding-prompting\\out\\server\\mcpBridge.js",
+        "--stdio"
+      ],
+      "command": "node",
+      "disabled": false,
+      "env": {
+        "NODE_ENV": "production"
+      }
+    },
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "git": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-git"
+      ]
+    }
+  }
+}
+

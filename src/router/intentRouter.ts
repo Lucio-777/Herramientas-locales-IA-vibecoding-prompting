@@ -5,22 +5,38 @@ export class IntentRouter {
 
     /**
      * Evalúa el mensaje del usuario, las imágenes adjuntas y el contexto para determinar el modelo óptimo.
-     * Soporta palabras clave en español e inglés.
+     * JERARQUÍA DE 4 NIVELES:
+     * Por defecto, TODAS las solicitudes se enrutan a FreeLLMAPI (127.0.0.1:3001) para máxima velocidad
+     * y cero consumo de hardware local/RAM. Ollama (127.0.0.1:11434) solo se invoca si el usuario
+     * especifica explícitamente '@local' o '#local'.
      */
     public route(userMessage: string, images?: string[]): RoutingDecision {
         const normalizedMsg = userMessage.toLowerCase().trim();
+        const forceLocal = normalizedMsg.includes('@local') || normalizedMsg.includes('#local');
 
-        // 1. Detección de Imágenes -> Llama 3.2 Vision
+        // Detección de consulta sobre estado de proveedores y modelos del ecosistema
+        const providerStatusKeywords = [
+            'cuántos proveedores', 'cuantos proveedores', 'qué proveedores', 'que proveedores',
+            'modelos tienes', 'modelos escuchando', 'modelos respondiendo', 'quién responde',
+            'quien responde', 'estado de modelos', 'estado del ecosistema', 'cuántos modelos',
+            'cuantos modelos', 'providers status', 'model status'
+        ];
+        const isProviderStatusRequest = providerStatusKeywords.some(kw => normalizedMsg.includes(kw));
+
+        // 1. Detección de Imágenes -> Llama 3.2 Vision (FreeLLMAPI Vision Pool o Local)
         if (images && images.length > 0) {
             return {
                 intent: 'VISION',
-                targetModel: this.config.visionModel,
-                reason: 'Se detectaron imágenes adjuntas (mockups, diagramas, capturas). Enrutando a Llama 3.2 Vision.'
+                targetModel: forceLocal ? (this.config.visionModel || 'llama3.2-vision:11b') : 'llama-3.2-11b-vision',
+                reason: forceLocal
+                    ? 'Se detectaron imágenes adjuntas con @local forzado. Enrutando a Llama 3.2 Vision local.'
+                    : 'Se detectaron imágenes adjuntas. Enrutando a Llama 3.2 Vision Pool (FreeLLMAPI Nivel 2).',
+                forceLocal,
+                isProviderStatusRequest
             };
         }
 
-        // 2. Detección de Razonamiento Profundo / Arquitectura / Consultoría de Producto / Debugging Teórico -> DeepSeek R1
-        // Palabras clave en español e inglés
+        // 2. Detección de Razonamiento Profundo / Arquitectura / Consultoría de Producto / Debugging Teórico
         const reasoningKeywords = [
             // Español - Arquitectura y técnica
             'arquitectura', 'arquitecto', 'arquitecto de datos', 'base de datos', 'bases de datos',
@@ -52,25 +68,69 @@ export class IntentRouter {
             'differentiators', 'use cases', 'target market', 'missing features'
         ];
 
-        const isReasoningRequest = reasoningKeywords.some(kw => normalizedMsg.includes(kw));
+        const isReasoningRequest = isProviderStatusRequest || reasoningKeywords.some(kw => normalizedMsg.includes(kw));
 
         if (isReasoningRequest) {
+            const targetModel = forceLocal 
+                ? (this.config.reasoningModel || 'deepseek-r1:8b')
+                : 'deepseek-r1-distill-qwen-32b';
+
             return {
                 intent: 'REASONING',
-                targetModel: this.config.reasoningModel,
-                reason: 'La consulta requiere análisis arquitectónico, conceptual, de producto o razonamiento profundo. Enrutando a DeepSeek R1.',
+                targetModel,
+                reason: forceLocal
+                    ? `Razonamiento profundo con @local forzado en Ollama (${targetModel}).`
+                    : `Razonamiento profundo / Arquitectura. Enrutando a Nivel 2 Cloud Free Pool (${targetModel} vía FreeLLMAPI :3001).`,
                 enhancedSystemPrompt: 'Eres DeepSeek R1 actuando como un analista experto, arquitecto de sistemas y consultor senior (PM/CTO/Inversionista). ' +
-                    'Responde con pensamiento crítico, razonamiento profundo y una estructura analítica impecable. ' +
-                    'NUNCA transcribas, recites ni listes guías o metodologías internas en crudo; aplica tu criterio directamente para responder a fondo la solicitud del usuario.'
+                    'Responde con pensamiento crítico, rigor analítico y una estructura impecable. ' +
+                    'NUNCA transcribas ni recites guías internas o metodologías en crudo: aplica tu criterio directamente para responder a fondo la solicitud del usuario.',
+                forceLocal,
+                isProviderStatusRequest
             };
         }
 
-        // 3. Flujo Predeterminado -> Agente de Código con Tool Calling (Qwen Coder)
+        // 3. Orquestación Rápida: Consultas breves, saludos, commits, resúmenes
+        const lightweightKeywords = [
+            'explica qué hace', 'qué significa', 'crea un commit', 'mensaje de commit',
+            'renombra', 'formatea', 'añade un comentario', 'documenta esta función',
+            'quick', 'rápido', 'fast', '#fast', '@fast', 'hola', 'saludos', 'buenas'
+        ];
+        const isQuickTask = this.config.enableHybridRouting !== false && (
+            (userMessage.length < 100 && lightweightKeywords.some(kw => normalizedMsg.includes(kw))) ||
+            normalizedMsg.includes('#fast') || normalizedMsg.includes('@fast')
+        );
+
+        if (isQuickTask) {
+            const targetModel = forceLocal
+                ? (this.config.lightweightModel || 'qwen2.5-coder:3b')
+                : 'gpt-oss-120b'; // Nivel 1 Fastest Cloud Free Cerebras/Groq
+
+            return {
+                intent: 'CODING_AGENT',
+                targetModel,
+                reason: forceLocal
+                    ? `Tarea rápida en CPU local con ${targetModel}.`
+                    : `Tarea rápida / consulta cotidiana. Enrutando a Nivel 1 Fastest Cloud Free (${targetModel} en Cerebras/Groq ~30ms).`,
+                enhancedSystemPrompt: 'Eres un asistente de programación ultra-rápido integrado en VS Code. Responde con concisión, precisión y código listo para usar.',
+                forceLocal,
+                isProviderStatusRequest
+            };
+        }
+
+        // 4. Flujo Predeterminado -> Agente de Código con Tool Calling
+        const targetModel = forceLocal
+            ? (this.config.codingModel || 'qwen2.5-coder:7b')
+            : 'gpt-oss-120b'; // Nivel 1/2 vía FreeLLMAPI
+
         return {
             intent: 'CODING_AGENT',
-            targetModel: this.config.codingModel,
-            reason: 'Solicitud de programación, inspección de archivos, ejecución de comandos o refactorización. Enrutando al Agente de Código con herramientas.',
-            enhancedSystemPrompt: 'Eres un asistente de programación experto (Agente VibeCoding) integrado en VS Code con acceso a herramientas reales del filesystem y terminal. Usa readFile, listDirectory y semanticSearch para explorar el código antes de modificarlo. Usa createFile y editFile para implementar cambios. Usa runCommand para ejecutar builds, tests e instalaciones. Siempre verifica que el archivo existe antes de editarlo.'
+            targetModel,
+            reason: forceLocal
+                ? `Agente de código local en Ollama (${targetModel}) con herramientas.`
+                : `Agente de código con herramientas. Enrutando a Nivel 1/2 FreeLLMAPI (${targetModel} / auto) a latencia de milisegundos.`,
+            enhancedSystemPrompt: 'Eres un asistente de programación experto (Agente VibeCoding) integrado en VS Code con acceso a herramientas reales del filesystem y terminal. Usa readFile, listDirectory y semanticSearch para explorar el código antes de modificarlo. Usa createFile y editFile para implementar cambios. Usa runCommand para ejecutar builds, tests e instalaciones. Siempre verifica que el archivo existe antes de editarlo.',
+            forceLocal,
+            isProviderStatusRequest
         };
     }
 }

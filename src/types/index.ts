@@ -61,6 +61,8 @@ export interface RoutingDecision {
     targetModel: string;
     reason: string;
     enhancedSystemPrompt?: string;
+    forceLocal?: boolean;
+    isProviderStatusRequest?: boolean;
 }
 
 export interface RAGChunk {
@@ -127,6 +129,12 @@ export interface ExtensionConfig {
     enableAutoSkills?: boolean;
     skillsActivationMode?: 'on-demand' | 'always' | 'disabled';
     reasoningUseGpu?: boolean;
+    lightweightModel?: string;
+    enableHybridRouting?: boolean;
+    enableContextPruning?: boolean;
+    freellmApiUrl?: string;
+    freellmApiKey?: string;
+    freellmModel?: string;
 }
 
 // Mensajes bidireccionales entre Webview y Extensión
@@ -153,3 +161,19 @@ export type ExtensionToWebviewMessage =
     | { type: 'atSuggestionsResponse'; items: AtSuggestionItem[] }
     | { type: 'agentStatus'; status: 'idle' | 'busy'; text?: string }
     | { type: 'ragStatus'; status: 'indexing' | 'ready' | 'error'; message: string };
+
+// Tipos para el Patrón Supervisor Pro + Obreros FreeLLMAPI (Opción B)
+export type RoutingStrategy = 'auto' | 'massive_context' | 'ultra_fast' | 'deep_reasoning';
+
+export interface PendingProposal {
+    id: string;
+    filePath: string;
+    originalContent: string;
+    proposedContent: string;
+    unifiedDiff: string;
+    timestamp: number;
+    status: 'pending' | 'approved' | 'rejected';
+    metadata?: Record<string, any>;
+}
+
+

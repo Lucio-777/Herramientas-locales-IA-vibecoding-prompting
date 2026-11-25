@@ -60,30 +60,51 @@ export class SkillCatalogService {
         }
 
         const config = vscode.workspace.getConfiguration('vibe-coding-local');
-        // BUG FIX: Usar os.homedir() para el default en lugar de la ruta del usuario específico
-        const defaultSkillsPath = path.join(os.homedir(), 'Escritorio', 'skills');
-        let skillsPath = config.get<string>('skillsPath', defaultSkillsPath);
-
-        // Expandir ~ si se utiliza
-        if (skillsPath.startsWith('~')) {
-            skillsPath = path.join(os.homedir(), skillsPath.slice(1));
+        let configuredPath = (config.get<string>('skillsPath', '') || '').trim();
+        if (configuredPath.startsWith('~')) {
+            configuredPath = path.join(os.homedir(), configuredPath.slice(1));
         }
 
-        if (!fs.existsSync(skillsPath)) {
-            console.warn(`[SkillCatalog] Directorio de skills no encontrado en: ${skillsPath}. Configura 'vibe-coding-local.skillsPath' para habilitar skills.`);
-            return [];
+        const candidatePaths = [
+            configuredPath,
+            path.join(os.homedir(), '.gemini', 'config', 'skills'),
+            path.join(os.homedir(), '.gemini', 'antigravity-ide', 'builtin', 'skills'),
+            path.join(os.homedir(), '.vibecoding', 'skills'),
+            path.join(os.homedir(), 'Desktop', 'skills'),
+            path.join(os.homedir(), 'Escritorio', 'skills'),
+            ...(vscode.workspace.workspaceFolders ? [
+                path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, '.vibecoding', 'skills'),
+                path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, '.agents', 'skills'),
+                path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, '.skills'),
+                path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, 'skills')
+            ] : [])
+        ].filter(p => !!p && fs.existsSync(p));
+
+        if (candidatePaths.length === 0) {
+            // Auto-crear ~/.vibecoding/skills si no existe ninguna ruta previa
+            const defaultPath = path.join(os.homedir(), '.vibecoding', 'skills');
+            try {
+                fs.mkdirSync(defaultPath, { recursive: true });
+                candidatePaths.push(defaultPath);
+            } catch {
+                console.warn(`[SkillCatalog] No se pudo crear ni acceder a catálogo de skills.`);
+                return [];
+            }
         }
 
         this.isIndexing = true;
-        console.log(`[SkillCatalog] Escaneando catálogo de skills en '${skillsPath}'...`);
+        console.warn(`[SkillCatalog] Escaneando catálogo de skills en ${candidatePaths.length} almacenes...`);
 
         try {
             const discoveredFiles: string[] = [];
-            await this.findSkillFiles(skillsPath, discoveredFiles, 0, 4);
+            for (const dirPath of candidatePaths) {
+                await this.findSkillFiles(dirPath, discoveredFiles, 0, 4);
+            }
+            const uniqueFiles = Array.from(new Set(discoveredFiles));
 
             const newSkillsMap = new Map<string, SkillItem>();
 
-            for (const filePath of discoveredFiles) {
+            for (const filePath of uniqueFiles) {
                 try {
                     const content = await fs.promises.readFile(filePath, 'utf8');
                     const parsed = this.parseSkillContent(filePath, content);
@@ -97,7 +118,7 @@ export class SkillCatalogService {
 
             this.skills = newSkillsMap;
             this.lastIndexTime = Date.now();
-            console.log(`[SkillCatalog] ${this.skills.size} skills descubiertas.`);
+            console.warn(`[SkillCatalog] ${this.skills.size} skills descubiertas.`);
 
             // Generar embeddings en segundo plano (sin bloquear UI)
             this.generateEmbeddingsInBackground(config.get<string>('embeddingModel', 'nomic-embed-text:latest'));
@@ -162,6 +183,14 @@ export class SkillCatalogService {
 
             const descMatch = yamlText.match(/description:\s*(.+)/);
             if (descMatch) description = descMatch[1].replace(/['"]/g, '').trim();
+
+            const tagsMatch = yamlText.match(/tags:\s*\[(.*?)\]/);
+            if (tagsMatch) {
+                tagsMatch[1].split(',').forEach(t => {
+                    const cleanTag = t.replace(/['"\s]/g, '').toLowerCase();
+                    if (cleanTag) tags.add(cleanTag);
+                });
+            }
         }
 
         // 2. Si no hay frontmatter, buscar primer encabezado H1 y primer párrafo

@@ -57,7 +57,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
         type: 'function',
         function: {
             name: 'editFile',
-            description: 'Aplica una modificación quirúrgica a un archivo existente reemplazando exactamente el bloque targetChunk por replacement. Evita reescribir archivos enteros.',
+            description: 'Aplica una modificación quirúrgica resiliente a un archivo existente. Puede reemplazar el bloque targetChunk (con coincidencia exacta o difusa tolerante a espacios) o reemplazar directamente por rango de líneas con startLine y endLine. Guarda un backup automático.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -67,14 +67,39 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                     },
                     targetChunk: {
                         type: 'string',
-                        description: 'El fragmento exacto de texto que existe actualmente en el archivo y que deseas sustituir.'
+                        description: 'El fragmento de texto a sustituir en el archivo. Opcional si se especifica startLine y endLine.'
                     },
                     replacement: {
                         type: 'string',
                         description: 'El nuevo fragmento de texto de reemplazo.'
+                    },
+                    startLine: {
+                        type: 'number',
+                        description: 'Línea inicial (1-indexed) para reemplazo por rango. Opcional.'
+                    },
+                    endLine: {
+                        type: 'number',
+                        description: 'Línea final (1-indexed, inclusivo) para reemplazo por rango. Opcional.'
                     }
                 },
-                required: ['filePath', 'targetChunk', 'replacement']
+                required: ['filePath', 'replacement']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'restoreBackup',
+            description: 'Restaura un archivo modificado a su versión previa usando los backups automáticos guardados en .vibecoding/backups/.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    filePath: {
+                        type: 'string',
+                        description: 'Ruta del archivo a restaurar.'
+                    }
+                },
+                required: ['filePath']
             }
         }
     },
@@ -199,6 +224,52 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: ['skillNameOrKeyword']
             }
         }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'delegate_to_freellm_worker',
+            description: 'Opción B: delega la escritura de un archivo a un obrero FreeLLMAPI (fallback Ollama). Lee targetFile y referenceFiles localmente, deja la propuesta en staging y devuelve solo { proposalId, diffToAudit }. NO escribe a disco.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    taskInstruction: { type: 'string', description: 'Instrucción quirúrgica para el obrero.' },
+                    targetFile: { type: 'string', description: 'Archivo a crear/modificar (relativo al workspace).' },
+                    referenceFiles: { type: 'array', items: { type: 'string' }, description: 'Archivos de contexto leídos localmente (0 tokens Pro).' },
+                    strategy: { type: 'string', description: 'Enrutamiento del obrero.', enum: ['auto', 'massive_context', 'ultra_fast', 'deep_reasoning', 'local_only'] }
+                },
+                required: ['taskInstruction', 'targetFile']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'approve_worker_proposal',
+            description: 'Escribe a disco una propuesta en staging tras auditarla y devuelve los diagnósticos LSP del archivo (errores/warnings).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    proposalId: { type: 'string', description: 'ID devuelto por delegate_to_freellm_worker.' }
+                },
+                required: ['proposalId']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'reject_worker_proposal',
+            description: 'Descarta una propuesta en staging (sin tocar disco) para reintentar con otra instrucción.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    proposalId: { type: 'string', description: 'ID de la propuesta a descartar.' },
+                    reason: { type: 'string', description: 'Motivo del rechazo (opcional).' }
+                },
+                required: ['proposalId']
+            }
+        }
     }
 ];
 
@@ -215,6 +286,8 @@ export async function executeToolCall(
                 return await FileTools.createFile(args);
             case 'editFile':
                 return await FileTools.editFile(args);
+            case 'restoreBackup':
+                return await FileTools.restoreBackup(args);
             case 'listDirectory':
                 return await FileTools.listDirectory(args);
             case 'runCommand':
@@ -227,6 +300,12 @@ export async function executeToolCall(
                 return await FileTools.generateProjectContext();
             case 'getWorkspaceDiagnostics':
                 return DiagnosticTools.getWorkspaceDiagnostics(args);
+            case 'delegate_to_freellm_worker':
+            case 'approve_worker_proposal':
+            case 'reject_worker_proposal': {
+                const { dispatchBridgeTool } = await import('../services/mcpBridgeServer');
+                return await dispatchBridgeTool(toolName, (args && typeof args === 'object') ? args : {});
+            }
             case 'consultSkill': {
                 const { SkillCatalogService } = await import('../services/skillCatalogService');
                 const catalog = await SkillCatalogService.getInstance().indexSkills();

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/mcp-server-config.json",
+  "mcpServers": {
+    "vibecoding-http": {
+      "type": "http",
+      "url": "http://127.0.0.1:3002/mcp",
+      "description": "Puente Local VibeCoding + FreeLLMAPI en segundo plano (Multi-IDE: Visual Studio, VS Code, Antigravity)"
+    },
+    "vibecoding-stdio": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "out/server/mcpBridge.js",
+        "--stdio"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "description": "Transporte nativo Stdio para Visual Studio y clientes CLI sin depender de puertos"
+    }
+  }
+}

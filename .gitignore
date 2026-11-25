@@ -4,6 +4,11 @@ dist/
 .vscode/settings.json
 .env
 *.log
+logs/
+scratch/
+.vibecoding/backups/
+__pycache__/
+*.pyc
 .DS_Store
 
 .fake

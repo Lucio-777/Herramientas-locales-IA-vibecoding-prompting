@@ -67,7 +67,7 @@ ${errorTrace}
 INSTRUCCIONES DE ANÁLISIS:
 1. Identifica la causa raíz exacta del fallo (ej. ruta incorrecta, archivo no encontrado, targetChunk erróneo en editFile, comando no instalado, sintaxis incorrecta).
 2. Explica por qué el agente local cayó en un bucle o fallo recurrente.
-3. Proporciona un nuevo plan paso a paso con comandos corregidos o acciones específicas para que el agente qwen3-coder resuelva el problema sin repetir el mismo error.
+3. Proporciona un nuevo plan paso a paso con comandos corregidos o acciones específicas para que el agente qwen2.5-coder resuelva el problema sin repetir el mismo error.
 4. Si el error es de ruta de archivo, especifica la ruta correcta completa.
 5. Si el error es de editFile, indica que primero debe leer el archivo con readFile para obtener el fragmento exacto.
 

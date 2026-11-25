@@ -25,8 +25,10 @@ export class FileTools {
 
         if (path.isAbsolute(filePath) && workspaceFolders && workspaceFolders.length > 0) {
             const workspaceRoot = workspaceFolders[0].uri.fsPath;
-            if (!resolvedPath.startsWith(workspaceRoot)) {
-                // La ruta apunta fuera del workspace — registrar advertencia pero permitir (el modelo puede querer operar en otro dir)
+            const normResolved = path.normalize(resolvedPath).toLowerCase();
+            const normRoot = path.normalize(workspaceRoot).toLowerCase();
+            if (!normResolved.startsWith(normRoot)) {
+                // La ruta apunta fuera del workspace — registrar advertencia pero permitir
                 const warning = `⚠️ Advertencia: La ruta '${resolvedPath}' está fuera del workspace activo ('${workspaceRoot}'). Si esto es incorrecto, usa rutas relativas.`;
                 console.warn(`[FileTools] ${warning}`);
                 return { resolvedPath, warning };
@@ -121,11 +123,116 @@ export class FileTools {
     }
 
     /**
-     * Reemplazo quirúrgico por bloques de texto.
-     * BUG FIX: El fallback "aproximado" que podía corromper archivos fue eliminado.
-     * Si targetChunk no se encuentra exactamente, el error es explícito y dice qué hacer.
+     * Determina la raíz correcta del proyecto para guardar/leer backups en .vibecoding/backups/
+     * Si el archivo está dentro del workspace activo, usa el workspace. Si está fuera, busca la raíz del proyecto del archivo (donde haya package.json/.git).
      */
-    public static async editFile(args: { filePath: string; targetChunk: string; replacement: string }): Promise<ToolExecutionResult> {
+    private static resolveProjectRootForFile(fullPath: string): string {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+            const wsRoot = workspaceFolders[0].uri.fsPath;
+            const normFull = path.normalize(fullPath).toLowerCase();
+            const normWs = path.normalize(wsRoot).toLowerCase();
+            if (normFull.startsWith(normWs)) {
+                return wsRoot;
+            }
+        }
+        // El archivo está fuera del workspace actual: subir directorios hasta encontrar package.json, .git o .vibecoding
+        let currentDir = path.dirname(fullPath);
+        const rootDrive = path.parse(currentDir).root;
+        while (currentDir && currentDir !== rootDrive) {
+            if (
+                fs.existsSync(path.join(currentDir, 'package.json')) ||
+                fs.existsSync(path.join(currentDir, '.git')) ||
+                fs.existsSync(path.join(currentDir, '.vibecoding'))
+            ) {
+                return currentDir;
+            }
+            const parent = path.dirname(currentDir);
+            if (parent === currentDir) {
+                break;
+            }
+            currentDir = parent;
+        }
+        return path.dirname(fullPath);
+    }
+
+    /**
+     * Crea un backup automático en .vibecoding/backups/ antes de modificar un archivo
+     */
+    public static async createBackup(fullPath: string): Promise<string | null> {
+        try {
+            const root = this.resolveProjectRootForFile(fullPath);
+            const backupDir = path.join(root, '.vibecoding', 'backups');
+            await fs.promises.mkdir(backupDir, { recursive: true });
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const safeName = path.basename(fullPath).replace(/[^a-zA-Z0-9._-]/g, '_');
+            const backupFile = path.join(backupDir, `${safeName}_${timestamp}.bak`);
+            await fs.promises.copyFile(fullPath, backupFile);
+            return backupFile;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Restaura un archivo desde su backup más reciente
+     */
+    public static async restoreBackup(args: { filePath: string; backupId?: string }): Promise<ToolExecutionResult> {
+        const { resolvedPath: fullPath } = this.validateAndNormalizePath(args.filePath);
+        try {
+            const root = this.resolveProjectRootForFile(fullPath);
+            const backupDir = path.join(root, '.vibecoding', 'backups');
+            if (!fs.existsSync(backupDir)) {
+                return {
+                    toolName: 'restoreBackup',
+                    success: false,
+                    output: `No se encontraron backups en el directorio .vibecoding/backups.`
+                };
+            }
+
+            const safeName = path.basename(fullPath).replace(/[^a-zA-Z0-9._-]/g, '_');
+            const files = await fs.promises.readdir(backupDir);
+            const matchingBackups = files
+                .filter(f => f.startsWith(`${safeName}_`) && f.endsWith('.bak'))
+                .sort()
+                .reverse();
+
+            if (matchingBackups.length === 0) {
+                return {
+                    toolName: 'restoreBackup',
+                    success: false,
+                    output: `No se encontraron backups previos para '${path.basename(fullPath)}'.`
+                };
+            }
+
+            const targetBackup = args.backupId ? path.join(backupDir, args.backupId) : path.join(backupDir, matchingBackups[0]);
+            if (!fs.existsSync(targetBackup)) {
+                return {
+                    toolName: 'restoreBackup',
+                    success: false,
+                    output: `El backup especificado no existe: ${targetBackup}`
+                };
+            }
+
+            await fs.promises.copyFile(targetBackup, fullPath);
+            return {
+                toolName: 'restoreBackup',
+                success: true,
+                output: `Archivo '${path.basename(fullPath)}' restaurado con éxito desde el backup: ${path.basename(targetBackup)}.`
+            };
+        } catch (error: any) {
+            return {
+                toolName: 'restoreBackup',
+                success: false,
+                output: `Error al restaurar backup: ${error.message}`
+            };
+        }
+    }
+
+    /**
+     * Reemplazo quirúrgico resiliente con soporte de bloques de texto, rangos de línea y coincidencia difusa
+     */
+    public static async editFile(args: { filePath: string; targetChunk?: string; replacement: string; startLine?: number; endLine?: number }): Promise<ToolExecutionResult> {
         const { resolvedPath: fullPath } = this.validateAndNormalizePath(args.filePath);
         try {
             if (!fs.existsSync(fullPath)) {
@@ -136,39 +243,119 @@ export class FileTools {
                 };
             }
 
+            // 1. Crear backup automático antes de cualquier modificación
+            const backupPath = await this.createBackup(fullPath);
             const oldContent = await fs.promises.readFile(fullPath, 'utf8');
+            const lines = oldContent.split(/\r?\n/);
+            const eol = oldContent.includes('\r\n') ? '\r\n' : '\n';
 
-            // Normalización de saltos de línea para evitar diferencias \r\n vs \n
+            // CASO A: Reemplazo por rango de líneas explícito (startLine y endLine)
+            if (args.startLine !== undefined && args.endLine !== undefined && args.startLine > 0) {
+                const startIdx = Math.max(0, args.startLine - 1);
+                const endIdx = Math.min(lines.length, args.endLine);
+                if (startIdx <= endIdx) {
+                    const replacedSlice = lines.slice(startIdx, endIdx).join(eol);
+                    const newLines = [
+                        ...lines.slice(0, startIdx),
+                        args.replacement,
+                        ...lines.slice(endIdx)
+                    ];
+                    await fs.promises.writeFile(fullPath, newLines.join(eol), 'utf8');
+                    const backupNotice = backupPath ? ` (Backup guardado en .vibecoding/backups)` : '';
+                    return {
+                        toolName: 'editFile',
+                        success: true,
+                        output: `Éxito: Líneas ${args.startLine}-${args.endLine} reemplazadas en '${path.basename(fullPath)}'.${backupNotice}`,
+                        diff: {
+                            filePath: fullPath,
+                            oldContent: replacedSlice,
+                            newContent: args.replacement
+                        }
+                    };
+                }
+            }
+
+            // CASO B: Reemplazo por bloque targetChunk
+            if (!args.targetChunk) {
+                return {
+                    toolName: 'editFile',
+                    success: false,
+                    output: `Error: Debes proporcionar 'targetChunk' o bien 'startLine'/'endLine' para editar el archivo.`
+                };
+            }
+
             const normalize = (str: string) => str.replace(/\r\n/g, '\n');
             const normOld = normalize(oldContent);
             const normTarget = normalize(args.targetChunk);
             const normReplacement = normalize(args.replacement);
 
-            if (!normOld.includes(normTarget)) {
-                // BUG FIX: Eliminado el fallback con .trim() que podía hacer reemplazos incorrectos.
-                // En su lugar, retornamos un error explícito y accionable.
+            // B.1: Coincidencia exacta
+            if (normOld.includes(normTarget)) {
+                const newContent = normOld.replace(normTarget, normReplacement);
+                await fs.promises.writeFile(fullPath, newContent, 'utf8');
+                const backupNotice = backupPath ? ` (Backup guardado en .vibecoding/backups)` : '';
                 return {
                     toolName: 'editFile',
-                    success: false,
-                    output: `Error: El bloque 'targetChunk' NO se encontró exactamente en '${path.basename(fullPath)}'.\n\n` +
-                            `SOLUCIÓN: Usa 'readFile' en el archivo para obtener el fragmento exacto tal como está en el archivo ` +
-                            `(incluyendo espacios, indentación y saltos de línea), luego vuelve a llamar a 'editFile' con ese fragmento exacto.\n\n` +
-                            `Primeras 3 líneas del archivo actual:\n${normOld.split('\n').slice(0, 3).join('\n')}`
+                    success: true,
+                    output: `Éxito: Modificación quirúrgica aplicada a '${path.basename(fullPath)}'.${backupNotice}`,
+                    diff: {
+                        filePath: fullPath,
+                        oldContent: args.targetChunk,
+                        newContent: args.replacement
+                    }
                 };
             }
 
-            const newContent = normOld.replace(normTarget, normReplacement);
-            await fs.promises.writeFile(fullPath, newContent, 'utf8');
+            // B.2: Coincidencia difusa resiliente tolerante a indentación y espacios
+            const targetLinesTrimmed = normTarget.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            const oldLines = normOld.split('\n');
+
+            let bestMatchStart = -1;
+            let matchCount = 0;
+
+            if (targetLinesTrimmed.length > 0) {
+                for (let i = 0; i <= oldLines.length - targetLinesTrimmed.length; i++) {
+                    let matches = true;
+                    for (let j = 0; j < targetLinesTrimmed.length; j++) {
+                        if (oldLines[i + j].trim() !== targetLinesTrimmed[j]) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                    if (matches) {
+                        bestMatchStart = i;
+                        matchCount++;
+                    }
+                }
+            }
+
+            if (matchCount === 1 && bestMatchStart !== -1) {
+                const endMatch = bestMatchStart + targetLinesTrimmed.length;
+                const oldMatchedSlice = oldLines.slice(bestMatchStart, endMatch).join('\n');
+                const newLines = [
+                    ...oldLines.slice(0, bestMatchStart),
+                    normReplacement,
+                    ...oldLines.slice(endMatch)
+                ];
+                await fs.promises.writeFile(fullPath, newLines.join(eol), 'utf8');
+                const backupNotice = backupPath ? ` (Backup guardado en .vibecoding/backups)` : '';
+                return {
+                    toolName: 'editFile',
+                    success: true,
+                    output: `Éxito (vía coincidencia difusa resiliente): Modificación aplicada en líneas ${bestMatchStart + 1}-${endMatch} de '${path.basename(fullPath)}'.${backupNotice}`,
+                    diff: {
+                        filePath: fullPath,
+                        oldContent: oldMatchedSlice,
+                        newContent: args.replacement
+                    }
+                };
+            }
 
             return {
                 toolName: 'editFile',
-                success: true,
-                output: `Éxito: Modificación quirúrgica aplicada a '${path.basename(fullPath)}'.`,
-                diff: {
-                    filePath: fullPath,
-                    oldContent: args.targetChunk,
-                    newContent: args.replacement
-                }
+                success: false,
+                output: `Error: El bloque 'targetChunk' NO se encontró en '${path.basename(fullPath)}' ${matchCount > 1 ? '(múltiples bloques idénticos detectados)' : ''}.\n\n` +
+                        `SOLUCIÓN ALTERNATIVA: Puedes usar 'startLine' y 'endLine' para indicar exactamente el rango de líneas a reemplazar, o usa 'readFile' para inspeccionar el archivo.`
             };
         } catch (error: any) {
             return {

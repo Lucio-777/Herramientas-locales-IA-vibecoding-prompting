@@ -11,7 +11,7 @@ import {
 import { OllamaService } from './services/ollamaService';
 import { IntentRouter } from './router/intentRouter';
 import { LoopDetector } from './services/loopDetector';
-import { AGENT_TOOLS, executeToolCall, RAGTools, FileTools, DiagnosticTools } from './tools';
+import { AGENT_TOOLS, executeToolCall, RAGTools, FileTools, DiagnosticTools, TerminalTools } from './tools';
 import { enhancePromptWithCloud } from './cloudFilter';
 import { DiffService } from './services/diffService';
 import { RulesService } from './services/rulesService';
@@ -43,8 +43,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const cfg = vscode.workspace.getConfiguration('vibe-coding-local');
         return {
             ollamaHost: cfg.get<string>('ollamaHost', 'http://127.0.0.1:11434'),
-            codingModel: cfg.get<string>('codingModel', 'qwen3-coder-cpu:latest'),
-            reasoningModel: cfg.get<string>('reasoningModel', 'deepseek-r1:14b'),
+            codingModel: cfg.get<string>('codingModel', 'qwen2.5-coder:7b'),
+            reasoningModel: cfg.get<string>('reasoningModel', 'deepseek-r1:8b'),
             visionModel: cfg.get<string>('visionModel', 'llama3.2-vision:11b'),
             embeddingModel: cfg.get<string>('embeddingModel', 'nomic-embed-text:latest'),
             cloudFilterEnabled: cfg.get<boolean>('cloudFilterEnabled', false), // FIX: default false (consistente)
@@ -58,7 +58,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             maxActiveSkills: cfg.get<number>('maxActiveSkills', 2),
             enableAutoSkills: cfg.get<boolean>('enableAutoSkills', true),
             skillsActivationMode: cfg.get<'on-demand' | 'always' | 'disabled'>('skillsActivationMode', 'on-demand'),
-            reasoningUseGpu: cfg.get<boolean>('reasoningUseGpu', false)
+            reasoningUseGpu: cfg.get<boolean>('reasoningUseGpu', false),
+            lightweightModel: cfg.get<string>('lightweightModel', 'qwen2.5-coder:3b'),
+            enableHybridRouting: cfg.get<boolean>('enableHybridRouting', true),
+            enableContextPruning: cfg.get<boolean>('enableContextPruning', true),
+            freellmApiUrl: cfg.get<string>('freellmApiUrl', 'http://127.0.0.1:3001/v1'),
+            freellmApiKey: cfg.get<string>('freellmApiKey', ''),
+            freellmModel: cfg.get<string>('freellmModel', 'auto')
         };
     }
 
@@ -87,6 +93,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
    - generateProjectContext: generar resumen del proyecto
    - getWorkspaceDiagnostics: ver errores de TypeScript/linters
    - consultSkill: consultar skills especializadas del catálogo local
+   - restoreBackup: restaurar archivos a su estado previo ante errores imprevistos
 
 6. RESPONDE EN ESPAÑOL por defecto, a menos que el usuario escriba en inglés.`;
 
@@ -111,9 +118,36 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
         }
     }
 
+    /**
+     * Poda las salidas de herramientas más antiguas en el historial para prevenir saturación de contexto y memoria
+     */
+    private pruneHistoryContext() {
+        const config = this.getExtensionConfig();
+        if (config.enableContextPruning === false) return;
+
+        const toolIndices: number[] = [];
+        for (let i = 0; i < this.conversationHistory.length; i++) {
+            if (this.conversationHistory[i].role === 'tool') {
+                toolIndices.push(i);
+            }
+        }
+
+        // Conservar las últimas 4 salidas de herramientas intactas; podar las anteriores si exceden 300 caracteres
+        if (toolIndices.length > 4) {
+            const olderIndices = toolIndices.slice(0, toolIndices.length - 4);
+            for (const idx of olderIndices) {
+                const msg = this.conversationHistory[idx];
+                if (msg.content && msg.content.length > 300) {
+                    const firstLines = msg.content.split('\n').slice(0, 4).join('\n');
+                    msg.content = `${firstLines}\n... [Salida de herramienta podada para mantener la memoria y velocidad de inferencia óptimas]`;
+                }
+            }
+        }
+    }
+
     private async saveHistory() {
-        // FIX: Sliding window — mantener system prompt + últimos MAX_HISTORY_MESSAGES mensajes
-        // para evitar que el contexto exceda el context_length del modelo
+        // FIX: Poda dinámica + sliding window para evitar context overflow en CPU
+        this.pruneHistoryContext();
         const MAX = ChatViewProvider.MAX_HISTORY_MESSAGES;
         if (this.conversationHistory.length > MAX + 1) {
             const systemMsg = this.conversationHistory[0];
@@ -294,6 +328,49 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
                 activeContext += `${projectRules}\n\n`;
             }
 
+            // --- INYECCIÓN DE CONTEXTO POR MENCIONES (@file, @problems, @terminal, @git) ---
+            // 1. Archivos referenciados explícitamente con @file:<ruta> o @<ruta> o [Archivo: <ruta>]
+            const fileMentionRegex = /(?:@file:|\[Archivo:\s*|@)([a-zA-Z0-9_\-\.\/\\~]+\.[a-zA-Z0-9]+)\]?/gi;
+            let fileMatch: RegExpExecArray | null;
+            const processedFiles = new Set<string>();
+            while ((fileMatch = fileMentionRegex.exec(userText)) !== null) {
+                const rawPath = fileMatch[1].trim();
+                if (processedFiles.has(rawPath) || rawPath.toLowerCase().startsWith('skill:') || rawPath.toLowerCase().startsWith('git') || rawPath.toLowerCase().startsWith('terminal')) continue;
+                processedFiles.add(rawPath);
+                try {
+                    const readRes = await FileTools.readFile({ filePath: rawPath, maxBytes: 25000 });
+                    if (readRes.success) {
+                        activeContext += `\n[Contenido del archivo referenciado (@file:${rawPath})]:\n\`\`\`\n${readRes.output}\n\`\`\`\n\n`;
+                        this.postBadge('Contexto @file', 'success', `📄 Adjuntado archivo: ${path.basename(rawPath)}`);
+                    }
+                } catch {}
+            }
+
+            // 2. Errores y diagnósticos con @problems o @diagnostics
+            if (/@problems\b|@diagnostics\b|\[errores lsp\]/i.test(userText)) {
+                const diagSummary = DiagnosticTools.getDiagnosticsSummary();
+                activeContext += `\n[Diagnósticos y Errores LSP del Workspace]:\n${diagSummary}\n\n`;
+                this.postBadge('Contexto @problems', 'success', '🩺 Errores de compilación adjuntos');
+            }
+
+            // 3. Salida de consola con @terminal
+            if (/@terminal\b|\[terminal activa\]/i.test(userText)) {
+                const termRes = await TerminalTools.analyzeActiveTerminal();
+                if (termRes.success) {
+                    activeContext += `\n[Buffer de Terminal Activa]:\n${termRes.output}\n\n`;
+                    this.postBadge('Contexto @terminal', 'success', '📟 Salida reciente de terminal adjunta');
+                }
+            }
+
+            // 4. Cambios pendientes de git con @git o @diff
+            if (/@git\b|@diff\b|\[cambios git\]/i.test(userText)) {
+                const gitRes = await TerminalTools.runCommand({ command: 'git status --short && git diff' });
+                if (gitRes.success && gitRes.output.trim()) {
+                    activeContext += `\n[Cambios no confirmados de Git]:\n${gitRes.output.substring(0, 8000)}\n\n`;
+                    this.postBadge('Contexto @git', 'success', '🌿 Diff de Git adjunto');
+                }
+            }
+
             // Inyectar Skills Congruentes con el Proyecto y la Petición SOLO cuando el usuario lo indique
             try {
                 const isSkillRequested = SkillMatcher.isSkillRequestedByUser(userText);
@@ -329,6 +406,14 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             const routing = this.intentRouter.route(userText, images);
             console.log(`[IntentRouter] Decisión: ${routing.intent} -> ${routing.targetModel} (${routing.reason})`);
 
+            // Inyectar estado en vivo del ecosistema si la consulta pregunta por proveedores o modelos
+            if (routing.isProviderStatusRequest) {
+                this.postBadge('Ecosistema 4 Niveles', 'running', 'Consultando estado en vivo de FreeLLMAPI (:3001) y proveedores...');
+                const liveEcosystem = await this.ollamaService.getLiveEcosystemStatus();
+                activeContext = `${liveEcosystem}\n\n${activeContext}`;
+                this.postBadge('Ecosistema 4 Niveles', 'success', 'Sondeo en vivo de proveedores completado');
+            }
+
             // 2. Renderizar mensaje de usuario en UI
             this._view.webview.postMessage({
                 type: 'addMessage',
@@ -337,14 +422,14 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
                 images: images
             });
 
-            // 3. Orquestación armónica según la intención
+            // 3. Orquestación armónica según la intención (FreeLLMAPI Nivel 1/2 por defecto)
             if (routing.intent === 'VISION' && images && images.length > 0) {
-                await this.processVisionTurn(userText, images, activeContext, routing.targetModel);
+                await this.processVisionTurn(userText, images, activeContext, routing.targetModel, routing.forceLocal);
             } else if (routing.intent === 'REASONING') {
-                await this.processReasoningTurn(userText, activeContext, routing.targetModel, routing.enhancedSystemPrompt);
+                await this.processReasoningTurn(userText, activeContext, routing.targetModel, routing.enhancedSystemPrompt, routing.forceLocal);
             } else {
                 // CODING_AGENT (por defecto con Tool Calling y Streaming)
-                await this.processCodingAgentTurn(userText, activeContext, routing.targetModel, routing.enhancedSystemPrompt);
+                await this.processCodingAgentTurn(userText, activeContext, routing.targetModel, routing.enhancedSystemPrompt, routing.forceLocal);
             }
         } catch (error: any) {
             this._view.webview.postMessage({
@@ -357,13 +442,14 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
         }
     }
 
-    private async processVisionTurn(userText: string, images: string[], activeContext: string, model: string) {
-        this.postBadge('Llama Vision', 'running', 'Analizando imágenes, diagramas o mockups adjuntos...');
+    private async processVisionTurn(userText: string, images: string[], activeContext: string, model: string, forceLocal: boolean = false) {
+        const badgeLabel = forceLocal ? 'Llama Vision Local' : 'FreeLLMAPI Vision';
+        this.postBadge(badgeLabel, 'running', 'Analizando imágenes, diagramas o mockups adjuntos...');
         const visionPrompt = `${userText || 'Analiza esta imagen y describe los componentes visuales, estructura o código necesario.'}\n${activeContext ? `\nContexto del proyecto:\n${activeContext}` : ''}`;
-        const analysis = await this.ollamaService.analyzeVision(visionPrompt, images);
+        const analysis = await this.ollamaService.analyzeVision(visionPrompt, images, forceLocal);
         
-        this.postBadge('Llama Vision', 'success', 'Análisis visual completado');
-        this.addAgentMessage(analysis, 'Llama 3.2 Vision');
+        this.postBadge(badgeLabel, 'success', 'Análisis visual completado');
+        this.addAgentMessage(analysis, badgeLabel);
 
         this.conversationHistory.push({
             role: 'user',
@@ -380,7 +466,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
         const wantsCode = lowerPrompt.includes('crea') || lowerPrompt.includes('implementa') || lowerPrompt.includes('genera') || lowerPrompt.includes('construye') || lowerPrompt.includes('código') || lowerPrompt.includes('componente');
         
         if (wantsCode) {
-            this.postBadge('Qwen Coder', 'running', 'Traduciendo análisis visual a código en el workspace con herramientas...');
+            this.postBadge(forceLocal ? 'Qwen Coder' : 'FreeLLMAPI', 'running', 'Traduciendo análisis visual a código en el workspace con herramientas...');
             const codePrompt = `A partir del siguiente análisis de la imagen proporcionado por Llama Vision, procede a implementar o crear los archivos necesarios usando tus herramientas (createFile, editFile, readFile, etc.):\n\n${analysis}`;
             
             this.conversationHistory.push({
@@ -390,7 +476,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             await this.saveHistory();
 
             const config = this.getExtensionConfig();
-            await this.executeAgentLoop(config.codingModel, 0);
+            await this.executeAgentLoop(config.codingModel, 0, activeContext, undefined, forceLocal);
         }
     }
 
@@ -398,18 +484,17 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
         userText: string,
         activeContext: string,
         model: string,
-        systemPrompt?: string
+        systemPrompt?: string,
+        forceLocal: boolean = false
     ) {
-        this.postBadge('DeepSeek R1', 'running', 'Razonamiento profundo y análisis en curso...');
+        const badgeLabel = forceLocal ? 'DeepSeek R1 Local' : 'FreeLLMAPI Reasoning Pool';
+        this.postBadge(badgeLabel, 'running', 'Razonamiento profundo y análisis en curso...');
 
-        // deepseek-r1:14b: context_length del modelo = 131,072 tokens.
-        // num_ctx=32768 en ollamaService asegura espacio suficiente.
         const MAX_CONTEXT_CHARS = 100_000;
         const truncatedContext = activeContext.length > MAX_CONTEXT_CHARS
             ? activeContext.substring(0, MAX_CONTEXT_CHARS) + '\n\n[...contexto truncado por límite...]'
             : activeContext;
 
-        // Construir prompt estructurado asegurando que la petición del usuario no se pierda ni se confunda con skills
         let fullPrompt = '';
         if (truncatedContext && truncatedContext.trim().length > 0) {
             fullPrompt = `<contexto_referencia>\n${truncatedContext}\n</contexto_referencia>\n\n` +
@@ -424,12 +509,12 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             this._view.webview.postMessage({
                 type: 'streamStart',
                 role: 'agent',
-                model: 'DeepSeek R1'
+                model: badgeLabel
             });
         }
 
         const effectiveSystemPrompt = systemPrompt || 
-            'Eres DeepSeek R1, un analista de sistemas, arquitecto de software y consultor senior experto. ' +
+            'Eres DeepSeek R1 actuando como un analista experto, arquitecto de sistemas y consultor senior (PM/CTO/Inversionista). ' +
             'Responde con rigor analítico, pensamiento crítico y una estructura clara y detallada. ' +
             'NUNCA transcribas ni recites guías internas o metodologías en crudo: aplica tu criterio directamente para responder a la solicitud del usuario.';
 
@@ -445,7 +530,8 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             },
             effectiveSystemPrompt,
             false,
-            this.conversationHistory
+            this.conversationHistory,
+            forceLocal
         );
 
         if (this._view) {
@@ -455,7 +541,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             });
         }
         
-        this.postBadge('DeepSeek R1', 'success', 'Razonamiento finalizado');
+        this.postBadge(badgeLabel, 'success', 'Razonamiento finalizado');
 
         // Guardar historial limpio sin duplicar skills
         this.conversationHistory.push({
@@ -473,7 +559,8 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
         userText: string,
         activeContext: string,
         model: string,
-        enhancedSystemPrompt?: string
+        enhancedSystemPrompt?: string,
+        forceLocal: boolean = false
     ) {
         const config = this.getExtensionConfig();
         let promptToSend = userText;
@@ -489,7 +576,6 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             }
         }
 
-        // Agregar al historial de forma limpia (SOLO la petición del usuario, sin ensuciar la memoria con megabytes de skills)
         this.conversationHistory.push({
             role: 'user',
             content: promptToSend,
@@ -498,14 +584,15 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
         await this.saveHistory();
 
         // Iniciar bucle de ejecución de herramientas pasando el contexto del turno
-        await this.executeAgentLoop(model, 0, activeContext, enhancedSystemPrompt);
+        await this.executeAgentLoop(model, 0, activeContext, enhancedSystemPrompt, forceLocal);
     }
 
     private async executeAgentLoop(
         model: string,
         depth: number,
         activeContext?: string,
-        enhancedSystemPrompt?: string
+        enhancedSystemPrompt?: string,
+        forceLocal: boolean = false
     ) {
         const config = this.getExtensionConfig();
 
@@ -519,17 +606,17 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             this.addAgentMessage(
                 `⚠️ Se alcanzó el límite de ${config.maxToolRecursionDepth} pasos del agente. ` +
                 `Si la tarea está incompleta, describe qué queda por hacer y continuaré.`,
-                'Qwen Coder'
+                forceLocal ? 'Qwen Coder' : 'FreeLLMAPI'
             );
             return;
         }
 
-        // FIX: Indicador de progreso — el usuario ve en qué paso va el agente
         if (depth > 0) {
             this.postBadge('Agente', 'running', `⚙️ Paso ${depth + 1}/${config.maxToolRecursionDepth} — Continuando razonamiento...`);
         }
 
-        this.postBadge('Qwen Coder', 'running', 'Generando respuesta / evaluando herramientas...');
+        const agentBadge = forceLocal ? 'Ollama Local' : 'FreeLLMAPI';
+        this.postBadge(agentBadge, 'running', `Generando respuesta / evaluando herramientas (${forceLocal ? model : 'Cerebras/Groq/Pool'})...`);
 
         let assistantMsg: ChatMessage;
         let toolCalls: any[] = [];
@@ -538,12 +625,10 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             this._view.webview.postMessage({
                 type: 'streamStart',
                 role: 'agent',
-                model: 'Qwen Coder'
+                model: forceLocal ? `Ollama (${model})` : `FreeLLMAPI (${model || 'auto'})`
             });
         }
 
-        // Construir mensajes para el turno actual:
-        // FIX: Sliding window para evitar que la acumulación de historial desborde el procesamiento de CPU en Ollama
         let messagesToSend = this.conversationHistory.map(m => ({ ...m }));
         if (messagesToSend.length > 12) {
             const systemMsg = messagesToSend.find(m => m.role === 'system');
@@ -574,7 +659,8 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
                         token: token
                     });
                 }
-            }
+            },
+            forceLocal
         );
 
         assistantMsg = streamResult.message;
@@ -655,7 +741,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             }
 
             // Continuar con el siguiente turno del agente pasando contexto
-            await this.executeAgentLoop(model, depth + 1, activeContext, enhancedSystemPrompt);
+            await this.executeAgentLoop(model, depth + 1, activeContext, enhancedSystemPrompt, forceLocal);
         }
     }
 
@@ -664,13 +750,29 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
         const normalizedQuery = query.toLowerCase().trim();
         const items: AtSuggestionItem[] = [];
 
+        // 0. Modo de ahorro de tokens / ejecución
+        items.push({
+            id: 'local',
+            label: '@local',
+            detail: '🛡️ Ahorro de Tokens: Forzar ejecución 100% en modelo local (0 costo de nube)',
+            type: 'skill',
+            insertText: '@local '
+        });
+        items.push({
+            id: 'cloud',
+            label: '@cloud',
+            detail: '☁️ Cloud Meta-Prompt: Forzar optimización en la nube con Groq/Gemini',
+            type: 'skill',
+            insertText: '@cloud '
+        });
+
         // 1. Sugerencia de Problemas/Diagnósticos LSP
         items.push({
             id: 'problems',
             label: '@problems',
             detail: 'Inyectar errores y advertencias de compilación del workspace',
             type: 'problems',
-            insertText: DiagnosticTools.getDiagnosticsSummary()
+            insertText: '@problems '
         });
 
         // 2. Sugerencia de Terminal Activa
@@ -679,7 +781,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             label: '@terminal',
             detail: 'Inyectar el buffer reciente de la terminal activa',
             type: 'terminal',
-            insertText: 'Por favor analiza el buffer de mi terminal activa.'
+            insertText: '@terminal '
         });
 
         // 3. Sugerencia de Git Diff
@@ -688,7 +790,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
             label: '@git',
             detail: 'Inyectar cambios no confirmados (git diff)',
             type: 'git',
-            insertText: 'Por favor analiza mis cambios pendientes de git.'
+            insertText: '@git '
         });
 
         // 4. Búsqueda de Skills Especializadas Locales
@@ -701,7 +803,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
                         label: `@skill:${skill.id}`,
                         detail: `🎯 Skill: ${skill.name} (${skill.tags.slice(0, 3).join(', ')})`,
                         type: 'skill',
-                        insertText: `[Aplicar Skill: ${skill.name}]`
+                        insertText: `@skill:${skill.id} `
                     });
                 }
             }
@@ -718,7 +820,7 @@ Tienes acceso a herramientas reales del filesystem y terminal del usuario. REGLA
                         label: `@${relPath}`,
                         detail: `Archivo del proyecto: ${path.basename(file.fsPath)}`,
                         type: 'file',
-                        insertText: `[Archivo: ${relPath}]`
+                        insertText: `@file:${relPath} `
                     });
                 }
             }

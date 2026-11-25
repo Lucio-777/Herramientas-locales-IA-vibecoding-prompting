@@ -3,10 +3,43 @@ import * as cp from 'child_process';
 import { ToolExecutionResult } from '../types';
 
 export class TerminalTools {
+    private static isDangerousCommand(cmd: string): { dangerous: boolean; reason?: string } {
+        const lower = cmd.toLowerCase().trim();
+        const dangerousPatterns = [
+            { regex: /\brm\s+-(?:r|f|rf|fr)\s+(?:\/|~|\.\.|\*)/, reason: 'Eliminación recursiva masiva o de raíz' },
+            { regex: /\brmdir\s+\/(?:s|q)\s+[a-z]:\\/i, reason: 'Eliminación forzada de unidad de disco' },
+            { regex: /\bdel\s+(?:\/[a-z\s]+)*(?:[a-z]:\\|\*)/i, reason: 'Eliminación masiva de archivos en Windows' },
+            { regex: /\bformat\s+[a-z]:/i, reason: 'Formateo de unidad' },
+            { regex: /\bgit\s+reset\s+--hard\b/, reason: 'Pérdida irreversible de cambios en Git' },
+            { regex: /\bgit\s+clean\s+-(?:f|fd|fdx|xdf)\b/, reason: 'Eliminación irreversible de archivos no rastreados' },
+            { regex: /\bgit\s+push\s+.*--force\b/, reason: 'Sobrescritura forzada en repositorio remoto' },
+            { regex: /\b(?:shutdown|reboot|init\s+0)\b/, reason: 'Apagado o reinicio del sistema' },
+            { regex: /\b(?:mkfs|dd\s+if=)\b/, reason: 'Sobrescritura de disco a bajo nivel' },
+            { regex: /\bdrop\s+database\b/i, reason: 'Destrucción de base de datos' }
+        ];
+
+        for (const p of dangerousPatterns) {
+            if (p.regex.test(lower)) {
+                return { dangerous: true, reason: p.reason };
+            }
+        }
+        return { dangerous: false };
+    }
+
     /**
-     * Ejecuta un comando en la terminal asíncronamente capturando stdout y stderr
+     * Ejecuta un comando en la terminal asíncronamente capturando stdout y stderr con filtro de seguridad
      */
     public static async runCommand(args: { command: string; cwd?: string; timeoutMs?: number }): Promise<ToolExecutionResult> {
+        // Validación de seguridad previa
+        const safetyCheck = this.isDangerousCommand(args.command);
+        if (safetyCheck.dangerous) {
+            return {
+                toolName: 'runCommand',
+                success: false,
+                output: `⚠️ BLOQUEO DE SEGURIDAD VIBECODING: El comando '${args.command}' fue cancelado porque contiene patrones potencialmente destructivos (${safetyCheck.reason}). Por favor ejecuta este comando manualmente en la terminal integrada si realmente lo necesitas.`
+            };
+        }
+
         return new Promise((resolve) => {
             let workingDir = process.cwd();
             const workspaceFolders = vscode.workspace.workspaceFolders;

@@ -12,7 +12,9 @@
         "AI",
         "Chat"
     ],
-    "activationEvents": [],
+    "activationEvents": [
+        "onStartupFinished"
+    ],
     "main": "./out/extension.js",
     "contributes": {
         "viewsContainers": {
@@ -85,13 +87,13 @@
                 },
                 "vibe-coding-local.codingModel": {
                     "type": "string",
-                    "default": "qwen3-coder-cpu:latest",
-                    "description": "Modelo principal para generación de código y Tool Calling (ej. qwen3-coder-cpu:latest, qwen2.5-coder:7b)."
+                    "default": "qwen2.5-coder:7b",
+                    "description": "Modelo principal para generación de código y Tool Calling (ej. qwen2.5-coder:7b, qwen2.5-coder:3b)."
                 },
                 "vibe-coding-local.reasoningModel": {
                     "type": "string",
-                    "default": "deepseek-r1:14b",
-                    "description": "Modelo de razonamiento profundo para análisis de fallos, arquitectura y resolución de bucles."
+                    "default": "deepseek-r1:8b",
+                    "description": "Modelo de razonamiento profundo para análisis de fallos, arquitectura y resolución de bucles (ej. deepseek-r1:8b, deepseek-r1:1.5b)."
                 },
                 "vibe-coding-local.visionModel": {
                     "type": "string",
@@ -127,11 +129,27 @@
                     "type": "string",
                     "enum": [
                         "auto",
+                        "freellmapi",
                         "gemini",
                         "groq"
                     ],
                     "default": "auto",
-                    "description": "Proveedor preferido para el Meta-Prompt en la nube: 'auto' (alterna respetando límites de cuota), 'gemini' o 'groq'."
+                    "description": "Proveedor preferido para el Meta-Prompt en la nube: 'auto' (usa FreeLLMAPI en localhost:3001 con failover multi-proveedor, o alterna Gemini/Groq), 'freellmapi', 'gemini' o 'groq'."
+                },
+                "vibe-coding-local.freellmApiUrl": {
+                    "type": "string",
+                    "default": "http://127.0.0.1:3001/v1",
+                    "description": "Endpoint base de FreeLLMAPI (Proxy local de rotación automática y failover multi-proveedor)."
+                },
+                "vibe-coding-local.freellmApiKey": {
+                    "type": "string",
+                    "default": "freellmapi-86a31ceb7d1a23a23a9d761e0d2c92dfc9efb25675381691",
+                    "description": "Clave API unificada de FreeLLMAPI (opcional en loopback)."
+                },
+                "vibe-coding-local.freellmModel": {
+                    "type": "string",
+                    "default": "auto",
+                    "description": "Modelo o cadena de enrutamiento en FreeLLMAPI (ej. 'auto', 'auto:coding', 'gemini-2.0-flash', 'llama-3.3-70b-versatile')."
                 },
                 "vibe-coding-local.groqApiKey": {
                     "type": "string",
@@ -175,8 +193,8 @@
                 },
                 "vibe-coding-local.skillsPath": {
                     "type": "string",
-                    "default": "/home/juan-geronimo-lucio-ramirez/Escritorio/skills",
-                    "description": "Ruta absoluta al directorio donde residen las habilidades especializadas (Skills)."
+                    "default": "",
+                    "description": "Ruta absoluta o relativa al directorio donde residen las habilidades especializadas (Skills). Si se deja en blanco, busca automáticamente en ~/.vibecoding/skills, ~/Desktop/skills o el workspace."
                 },
                 "vibe-coding-local.enableAutoSkills": {
                     "type": "boolean",
@@ -198,6 +216,21 @@
                     "type": "boolean",
                     "default": false,
                     "description": "Si está desactivado (recomendado para APUs AMD/Intel o GPUs con menos de 12GB VRAM), ejecuta el modelo de razonamiento en CPU para evitar errores 500 de memoria VRAM o ROCm."
+                },
+                "vibe-coding-local.lightweightModel": {
+                    "type": "string",
+                    "default": "qwen2.5-coder:3b",
+                    "description": "Modelo ligero ultrarrápido para tareas breves, resúmenes, chats rápidos e intención preliminar en CPU."
+                },
+                "vibe-coding-local.enableHybridRouting": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enrutamiento inteligente híbrido 3B ➔ 7B: usa el modelo liviano para consultas simples y escala al modelo de 7B o razonamiento para programación compleja."
+                },
+                "vibe-coding-local.enableContextPruning": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Poda dinámica de contexto: trunca salidas masivas de herramientas anteriores para ahorrar RAM de CPU y evitar saturación del contexto de Ollama."
                 }
             }
         }
